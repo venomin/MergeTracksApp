@@ -2,3 +2,4 @@
 .cr
 bin
 obj
+*.user
