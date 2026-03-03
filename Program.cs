@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -15,14 +15,16 @@ if (!Directory.Exists(inputFolder))
 {
     Directory.CreateDirectory(inputFolder);
     Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine($"The 'input' folder was not found. And therefore created: {inputFolder}\r\nPut your tracks into the folder and restart the application");
+    Console.WriteLine($"The 'input' folder was not found.\nTherefore it was automatically created: {inputFolder}");
+    Console.WriteLine($"Please put your files, you want to merge into the folder and restart this application");
     Console.ResetColor();
-    Console.ReadKey();
+    WaitAndExit();
     return;
 }
 
 // --- Search for files ---
-var inputFiles = Directory.GetFiles(inputFolder)
+var inputFiles = Directory
+    .GetFiles(inputFolder)
     .Where(f => f.EndsWith(".gpx", StringComparison.OrdinalIgnoreCase) ||
                 f.EndsWith(".kml", StringComparison.OrdinalIgnoreCase))
     .ToList();
@@ -30,10 +32,37 @@ var inputFiles = Directory.GetFiles(inputFolder)
 if (!inputFiles.Any())
 {
     Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine($"No .gpx or .kml files found in the folder '{inputFolder}'. The program will exit.");
+    Console.WriteLine($"No .gpx or .kml files found in the folder '{inputFolder}'.");
+    Console.WriteLine($"Please put your files, you want to merge into the folder and restart this application");
     Console.ResetColor();
-    Console.ReadKey();
+    WaitAndExit();
     return;
+}
+
+// --- PROMPT FOR OUTPUT FORMAT (SINGLE KEY PRESS) ---
+Console.WriteLine("Which output format do you want to create? (Press 'G' for GPX or 'K' for KML)");
+string outputFormat = "";
+
+while (true)
+{
+    // ReadKey(true) intercepts the key press so it doesn't print to the screen automatically,
+    // and it doesn't wait for Enter to be pressed.
+    var keyInfo = Console.ReadKey(intercept: true);
+    char key = char.ToLower(keyInfo.KeyChar);
+
+    if (key == 'g')
+    {
+        outputFormat = "gpx";
+        Console.WriteLine("> GPX selected.\n");
+        break;
+    }
+    else if (key == 'k')
+    {
+        outputFormat = "kml";
+        Console.WriteLine("> KML selected.\n");
+        break;
+    }
+    // If they press any other key, it just silently waits for 'g' or 'k'
 }
 
 Console.WriteLine($"Found {inputFiles.Count} file(s) in the 'input' folder.");
@@ -47,11 +76,10 @@ if (!Directory.Exists(outputFolder))
 
 // --- Generate filename ---
 string timestamp = DateTime.Now.ToString("dd.MM.yy_HH-mm");
-string baseFilename = $"CombinedTracks_{timestamp}";
-string extension = ".gpx";
+string extension = $".{outputFormat}";
+string baseFilename = timestamp;
 string outputFile = Path.Combine(outputFolder, baseFilename + extension);
 
-// If file already exists, append an index (e.g., _2.gpx)
 int counter = 2;
 while (File.Exists(outputFile))
 {
@@ -63,7 +91,8 @@ while (File.Exists(outputFile))
 XNamespace gpxNs = "http://www.topografix.com/GPX/1/1";
 XNamespace kmlNs = "http://www.opengis.net/kml/2.2";
 
-List<XElement> gpxTracks = new();
+// List to hold neutral track data in memory
+List<TrackData> extractedTracks = new();
 
 // --- Process files ---
 foreach (var file in inputFiles)
@@ -80,24 +109,22 @@ foreach (var file in inputFiles)
 
         if (ext == ".gpx")
         {
-            // Find all trkpt elements and convert them to proper XElements
-            var trkPts = doc.Descendants(gpxNs + "trkpt")
-                            .Select(p => new XElement(gpxNs + "trkpt",
-                                new XAttribute("lat", (string)p.Attribute("lat") ?? ""),
-                                new XAttribute("lon", (string)p.Attribute("lon") ?? "")
-                            )).ToList();
-
+            var trkPts = doc.Descendants(gpxNs + "trkpt").ToList();
             if (trkPts.Any())
             {
-                gpxTracks.Add(new XElement(gpxNs + "trk",
-                    new XElement(gpxNs + "name", baseName),
-                    new XElement(gpxNs + "trkseg", trkPts)
-                ));
+                var track = new TrackData { Name = baseName };
+                foreach (var pt in trkPts)
+                {
+                    string lat = (string)pt.Attribute("lat") ?? "";
+                    string lon = (string)pt.Attribute("lon") ?? "";
+                    if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
+                        track.Points.Add(new Coordinate { Lat = lat, Lon = lon });
+                }
+                extractedTracks.Add(track);
             }
         }
         else if (ext == ".kml")
         {
-            // Find all coordinate blocks in KML
             var coordinateNodes = doc.Descendants(kmlNs + "Placemark")
                                      .Descendants(kmlNs + "LineString")
                                      .Descendants(kmlNs + "coordinates")
@@ -107,30 +134,25 @@ foreach (var file in inputFiles)
             foreach (var node in coordinateNodes)
             {
                 string rawCoords = node.Value;
-                // Split by spaces, tabs, and newlines
                 var points = rawCoords.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
 
-                List<XElement> trkPts = new();
+                var track = new TrackData
+                {
+                    Name = coordinateNodes.Count > 1 ? $"{baseName}_{trackIndex}" : baseName
+                };
+
                 foreach (var point in points)
                 {
                     if (point.Contains(","))
                     {
                         var parts = point.Split(',');
-                        // KML is lon,lat - GPX requires lat="..." lon="..."
-                        trkPts.Add(new XElement(gpxNs + "trkpt",
-                            new XAttribute("lat", parts[1].Trim()),
-                            new XAttribute("lon", parts[0].Trim())
-                        ));
+                        track.Points.Add(new Coordinate { Lon = parts[0].Trim(), Lat = parts[1].Trim() });
                     }
                 }
 
-                if (trkPts.Any())
+                if (track.Points.Any())
                 {
-                    string trackName = coordinateNodes.Count > 1 ? $"{baseName}_{trackIndex}" : baseName;
-                    gpxTracks.Add(new XElement(gpxNs + "trk",
-                        new XElement(gpxNs + "name", trackName),
-                        new XElement(gpxNs + "trkseg", trkPts)
-                    ));
+                    extractedTracks.Add(track);
                     trackIndex++;
                 }
             }
@@ -141,14 +163,51 @@ foreach (var file in inputFiles)
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine($"Warning: Error processing file '{fileName}'. {ex.Message}");
         Console.ResetColor();
-        Console.ReadKey();
     }
 }
 
-// --- Assemble and save the resulting XML ---
-if (gpxTracks.Any())
+// --- Create Output File ---
+if (extractedTracks.Any())
 {
-    var newGpxDoc = new XDocument(
+    if (outputFormat == "gpx")
+    {
+        CreateGpxOutput(extractedTracks, timestamp, outputFile);
+    }
+    else if (outputFormat == "kml")
+    {
+        CreateKmlOutput(extractedTracks, timestamp, outputFile);
+    }
+}
+else
+{
+    Console.WriteLine("No valid track data was found in the processed files.");
+}
+
+WaitAndExit();
+
+// =========================================================================
+// METHODS & CLASSES 
+// =========================================================================
+
+static void CreateGpxOutput(List<TrackData> tracks, string timestamp, string outputFile)
+{
+    XNamespace gpxNs = "http://www.topografix.com/GPX/1/1";
+    List<XElement> gpxTracks = new();
+
+    foreach (var track in tracks)
+    {
+        var trkPts = track.Points.Select(p => new XElement(gpxNs + "trkpt",
+            new XAttribute("lat", p.Lat),
+            new XAttribute("lon", p.Lon)
+        ));
+
+        gpxTracks.Add(new XElement(gpxNs + "trk",
+            new XElement(gpxNs + "name", track.Name),
+            new XElement(gpxNs + "trkseg", trkPts)
+        ));
+    }
+
+    var newDoc = new XDocument(
         new XDeclaration("1.0", "utf-8", null),
         new XElement(gpxNs + "gpx",
             new XAttribute("version", "1.1"),
@@ -160,30 +219,86 @@ if (gpxTracks.Any())
         )
     );
 
+    SaveXmlDocument(newDoc, outputFile);
+}
+
+static void CreateKmlOutput(List<TrackData> tracks, string timestamp, string outputFile)
+{
+    XNamespace kmlNs = "http://www.opengis.net/kml/2.2";
+    List<XElement> placemarks = new();
+
+    foreach (var track in tracks)
+    {
+        string coordinateString = string.Join(" ", track.Points.Select(p => $"{p.Lon},{p.Lat},0"));
+
+        placemarks.Add(
+            new XElement(kmlNs + "Placemark",
+                new XElement(kmlNs + "name", track.Name),
+                new XElement(kmlNs + "styleUrl", "#line-style"),
+                new XElement(kmlNs + "LineString",
+                    new XElement(kmlNs + "tessellate", "1"),
+                    new XElement(kmlNs + "coordinates", coordinateString)
+                )
+            )
+        );
+    }
+
+    var newDoc = new XDocument(
+        new XDeclaration("1.0", "utf-8", null),
+        new XElement(kmlNs + "kml",
+            new XElement(kmlNs + "Document",
+                new XElement(kmlNs + "name", $"Merged Tracks ({timestamp})"),
+                new XElement(kmlNs + "Style", new XAttribute("id", "line-style"),
+                    new XElement(kmlNs + "LineStyle",
+                        new XElement(kmlNs + "color", "7f0000ff"),
+                        new XElement(kmlNs + "width", "4")
+                    )
+                ),
+                placemarks
+            )
+        )
+    );
+
+    SaveXmlDocument(newDoc, outputFile);
+}
+
+static void SaveXmlDocument(XDocument doc, string outputFile)
+{
     try
     {
-        // Settings for nice indentation (Pretty Print)
         XmlWriterSettings settings = new XmlWriterSettings { Indent = true };
         using (XmlWriter writer = XmlWriter.Create(outputFile, settings))
         {
-            newGpxDoc.Save(writer);
+            doc.Save(writer);
         }
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"\nSuccess! The merged GPX file has been saved to:\n{outputFile}");
+        Console.WriteLine($"\nSuccess! The merged file has been saved to:\n{outputFile}");
         Console.ResetColor();
-        Console.ReadKey();
     }
     catch (Exception ex)
     {
         Console.ForegroundColor = ConsoleColor.Red;
         Console.WriteLine($"Error saving the file: {ex.Message}");
         Console.ResetColor();
-        Console.ReadKey();
     }
 }
-else
+
+static void WaitAndExit()
 {
-    Console.WriteLine("No valid track data was found in the processed files.");
+    Console.WriteLine("\nPress any key to exit...");
     Console.ReadKey();
+}
+
+// --- Data Models ---
+class TrackData
+{
+    public string Name { get; set; } = string.Empty;
+    public List<Coordinate> Points { get; set; } = new();
+}
+
+class Coordinate
+{
+    public string Lat { get; set; } = string.Empty;
+    public string Lon { get; set; } = string.Empty;
 }
