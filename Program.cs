@@ -45,8 +45,6 @@ string outputFormat = "";
 
 while (true)
 {
-    // ReadKey(true) intercepts the key press so it doesn't print to the screen automatically,
-    // and it doesn't wait for Enter to be pressed.
     var keyInfo = Console.ReadKey(intercept: true);
     char key = char.ToLower(keyInfo.KeyChar);
 
@@ -62,7 +60,6 @@ while (true)
         Console.WriteLine("> KML selected.\n");
         break;
     }
-    // If they press any other key, it just silently waits for 'g' or 'k'
 }
 
 Console.WriteLine($"Found {inputFiles.Count} file(s) in the 'input' folder.");
@@ -87,11 +84,7 @@ while (File.Exists(outputFile))
     counter++;
 }
 
-// --- XML Namespaces ---
-XNamespace gpxNs = "http://www.topografix.com/GPX/1/1";
-XNamespace kmlNs = "http://www.opengis.net/kml/2.2";
-
-// List to hold neutral track data in memory
+// List to hold independent tracks
 List<TrackData> extractedTracks = new();
 
 // --- Process files ---
@@ -109,51 +102,106 @@ foreach (var file in inputFiles)
 
         if (ext == ".gpx")
         {
-            var trkPts = doc.Descendants(gpxNs + "trkpt").ToList();
-            if (trkPts.Any())
+            // Finde alle separaten Tracks (<trk>) in der Datei, unabhängig vom XML Namespace
+            var trkNodes = doc.Descendants().Where(e => e.Name.LocalName == "trk").ToList();
+            var rteNodes = doc.Descendants().Where(e => e.Name.LocalName == "rte").ToList();
+
+            if (trkNodes.Any())
             {
-                var track = new TrackData { Name = baseName };
-                foreach (var pt in trkPts)
+                foreach (var trk in trkNodes)
                 {
-                    string lat = (string)pt.Attribute("lat") ?? "";
-                    string lon = (string)pt.Attribute("lon") ?? "";
-                    if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
-                        track.Points.Add(new Coordinate { Lat = lat, Lon = lon });
+                    // Versuche den Originalnamen zu erhalten
+                    string trkName = trk.Elements().FirstOrDefault(e => e.Name.LocalName == "name")?.Value ?? baseName;
+                    var track = new TrackData { Name = trkName };
+
+                    var pts = trk.Descendants().Where(e => e.Name.LocalName == "trkpt").ToList();
+                    foreach (var pt in pts)
+                    {
+                        string lat = pt.Attribute("lat")?.Value ?? "";
+                        string lon = pt.Attribute("lon")?.Value ?? "";
+                        if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
+                            track.Points.Add(new Coordinate { Lat = lat, Lon = lon });
+                    }
+
+                    if (track.Points.Any())
+                        extractedTracks.Add(track);
                 }
-                extractedTracks.Add(track);
+            }
+
+            // Falls es sich um Routen (<rte>) handelt
+            if (rteNodes.Any())
+            {
+                foreach (var rte in rteNodes)
+                {
+                    string rteName = rte.Elements().FirstOrDefault(e => e.Name.LocalName == "name")?.Value ?? baseName;
+                    var track = new TrackData { Name = rteName };
+
+                    var pts = rte.Descendants().Where(e => e.Name.LocalName == "rtept").ToList();
+                    foreach (var pt in pts)
+                    {
+                        string lat = pt.Attribute("lat")?.Value ?? "";
+                        string lon = pt.Attribute("lon")?.Value ?? "";
+                        if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
+                            track.Points.Add(new Coordinate { Lat = lat, Lon = lon });
+                    }
+
+                    if (track.Points.Any())
+                        extractedTracks.Add(track);
+                }
+            }
+
+            // Fallback, falls die Datei weder <trk> noch <rte> hat (z.B. defekte Struktur)
+            if (!trkNodes.Any() && !rteNodes.Any())
+            {
+                var allPts = doc.Descendants().Where(e => e.Name.LocalName == "trkpt").ToList();
+                if (allPts.Any())
+                {
+                    var track = new TrackData { Name = baseName };
+                    foreach (var pt in allPts)
+                    {
+                        string lat = pt.Attribute("lat")?.Value ?? "";
+                        string lon = pt.Attribute("lon")?.Value ?? "";
+                        if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
+                            track.Points.Add(new Coordinate { Lat = lat, Lon = lon });
+                    }
+                    extractedTracks.Add(track);
+                }
             }
         }
         else if (ext == ".kml")
         {
-            var coordinateNodes = doc.Descendants(kmlNs + "Placemark")
-                                     .Descendants(kmlNs + "LineString")
-                                     .Descendants(kmlNs + "coordinates")
-                                     .ToList();
+            var placemarks = doc.Descendants().Where(e => e.Name.LocalName == "Placemark").ToList();
 
-            int trackIndex = 1;
-            foreach (var node in coordinateNodes)
+            foreach (var pm in placemarks)
             {
-                string rawCoords = node.Value;
-                var points = rawCoords.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                var lineStrings = pm.Descendants().Where(e => e.Name.LocalName == "LineString").ToList();
+                if (!lineStrings.Any()) continue;
 
-                var track = new TrackData
-                {
-                    Name = coordinateNodes.Count > 1 ? $"{baseName}_{trackIndex}" : baseName
-                };
+                string pmName = pm.Elements().FirstOrDefault(e => e.Name.LocalName == "name")?.Value ?? baseName;
 
-                foreach (var point in points)
+                int lsIndex = 1;
+                foreach (var ls in lineStrings)
                 {
-                    if (point.Contains(","))
+                    var coordsNode = ls.Descendants().FirstOrDefault(e => e.Name.LocalName == "coordinates");
+                    if (coordsNode == null || string.IsNullOrWhiteSpace(coordsNode.Value)) continue;
+
+                    var track = new TrackData { Name = lineStrings.Count > 1 ? $"{pmName}_{lsIndex}" : pmName };
+
+                    var points = coordsNode.Value.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var point in points)
                     {
-                        var parts = point.Split(',');
-                        track.Points.Add(new Coordinate { Lon = parts[0].Trim(), Lat = parts[1].Trim() });
+                        if (point.Contains(","))
+                        {
+                            var parts = point.Split(',');
+                            track.Points.Add(new Coordinate { Lon = parts[0].Trim(), Lat = parts[1].Trim() });
+                        }
                     }
-                }
 
-                if (track.Points.Any())
-                {
-                    extractedTracks.Add(track);
-                    trackIndex++;
+                    if (track.Points.Any())
+                    {
+                        extractedTracks.Add(track);
+                        lsIndex++;
+                    }
                 }
             }
         }
@@ -213,7 +261,7 @@ static void CreateGpxOutput(List<TrackData> tracks, string timestamp, string out
             new XAttribute("version", "1.1"),
             new XAttribute("creator", "MergeTracks .NET App"),
             new XElement(gpxNs + "metadata",
-                new XElement(gpxNs + "name", $"Merged Tracks ({timestamp})")
+                new XElement(gpxNs + "name", $"Track Collection ({timestamp})")
             ),
             gpxTracks
         )
@@ -247,7 +295,7 @@ static void CreateKmlOutput(List<TrackData> tracks, string timestamp, string out
         new XDeclaration("1.0", "utf-8", null),
         new XElement(kmlNs + "kml",
             new XElement(kmlNs + "Document",
-                new XElement(kmlNs + "name", $"Merged Tracks ({timestamp})"),
+                new XElement(kmlNs + "name", $"Track Collection ({timestamp})"),
                 new XElement(kmlNs + "Style", new XAttribute("id", "line-style"),
                     new XElement(kmlNs + "LineStyle",
                         new XElement(kmlNs + "color", "7f0000ff"),
@@ -273,7 +321,7 @@ static void SaveXmlDocument(XDocument doc, string outputFile)
         }
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"\nSuccess! The merged file has been saved to:\n{outputFile}");
+        Console.WriteLine($"\nSuccess! The file has been saved to:\n{outputFile}");
         Console.ResetColor();
     }
     catch (Exception ex)
@@ -291,6 +339,7 @@ static void WaitAndExit()
 }
 
 // --- Data Models ---
+// Komplett vereinfacht, keine Segmente mehr! Jeder Track bleibt ein eigener Track.
 class TrackData
 {
     public string Name { get; set; } = string.Empty;
